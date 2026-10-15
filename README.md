@@ -1,1 +1,1 @@
-# gip-cv-poc
+# GIP Change Velocity POC
