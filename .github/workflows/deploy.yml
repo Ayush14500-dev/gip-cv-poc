@@ -1,0 +1,129 @@
+name: deploy
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    outputs:
+      jira-key: ${{ steps.key.outputs.jira_key }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find Jira key in commit message
+        id: key
+        run: |
+          MSG="$(git log -1 --pretty=%B)"
+          KEY="$(echo "$MSG" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | head -1 || true)"
+          if [ -n "$KEY" ]; then
+            echo "Jira key found: $KEY"
+          else
+            echo "::warning::No Jira key in commit message - ServiceNow policy should flag this change for manual review"
+          fi
+          echo "jira_key=$KEY" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run tests
+        run: |
+          pip install pytest
+          mkdir -p test-results
+          PYTHONPATH=. pytest tests --junitxml=test-results/results.xml
+
+      - name: ServiceNow DevOps Unit Test Results
+        if: always()
+        uses: ServiceNow/servicenow-devops-test-report@v6.0.0
+        with:
+          devops-integration-token: ${{ secrets.SN_DEVOPS_INTEGRATION_TOKEN }}
+          instance-url: ${{ secrets.SN_INSTANCE_URL }}
+          tool-id: ${{ secrets.SN_ORCHESTRATION_TOOL_ID }}
+          context-github: ${{ toJSON(github) }}
+          job-name: 'Build'
+          xml-report-filename: test-results/results.xml
+          test-summary-name: 'GIP-POC-UnitTests'
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      change-number: ${{ steps.create.outputs.change-request-number }}
+    steps:
+      - name: ServiceNow Change
+        id: create
+        uses: ServiceNow/servicenow-devops-change@v7.1.0
+        with:
+          devops-integration-token: ${{ secrets.SN_DEVOPS_INTEGRATION_TOKEN }}
+          instance-url: ${{ secrets.SN_INSTANCE_URL }}
+          tool-id: ${{ secrets.SN_ORCHESTRATION_TOOL_ID }}
+          context-github: ${{ toJSON(github) }}
+          job-name: 'Deploy'
+          change-request: '{"setCloseCode":"true","attributes":{"chg_model":"007c4001c343101035ae3f52c1d3aeb2","type":"normal","short_description":"GIP POC - automated deployment from GitHub","description":"Change created by GitHub Actions for Change Velocity POC","implementation_plan":"Automated deploy via GitHub Actions","backout_plan":"Redeploy previous version","test_plan":"Unit tests published to ServiceNow"}}'
+          interval: '100'
+          timeout: '3600'
+          changeCreationTimeOut: '3600'
+          abortOnChangeCreationFailure: true
+
+      - name: Deploy
+        run: echo "Deploying under change ${{ steps.create.outputs.change-request-number }}"
+
+  update-jira:
+    name: Update Jira
+    needs: [ validate, build, deploy ]
+    if: always() && needs.validate.outputs.jira-key != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment on Jira and move to Done
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          KEY: ${{ needs.validate.outputs.jira-key }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          CHG: ${{ needs.deploy.outputs.change-number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          AUTH="$JIRA_USER_EMAIL:$JIRA_API_TOKEN"
+
+          if [ "$BUILD_RESULT" != "success" ]; then
+            TEXT="Build or tests failed - no ServiceNow change raised. Run: $RUN_URL"
+          elif [ "$DEPLOY_RESULT" = "success" ]; then
+            TEXT="Deployed successfully under ServiceNow change ${CHG:-unknown}. Run: $RUN_URL"
+          else
+            TEXT="Deployment did not complete (change ${CHG:-not created} was rejected, timed out or failed). Run: $RUN_URL"
+          fi
+          echo "$TEXT"
+
+          # Add comment to the Jira item
+          jq -n --arg b "$TEXT" '{body: $b}' > comment.json
+          curl -sf -u "$AUTH" -X POST -H "Content-Type: application/json" \
+            --data @comment.json "$JIRA_BASE_URL/rest/api/2/issue/$KEY/comment" > /dev/null \
+            && echo "Comment added to $KEY"
+
+          # Move to Done only when deployment succeeded
+          if [ "$DEPLOY_RESULT" = "success" ]; then
+            TID="$(curl -sf -u "$AUTH" "$JIRA_BASE_URL/rest/api/2/issue/$KEY/transitions" \
+              | jq -r '.transitions[] | select(.to.name=="Done" or .name=="Done") | .id' | head -1)"
+            if [ -n "$TID" ]; then
+              curl -sf -u "$AUTH" -X POST -H "Content-Type: application/json" \
+                --data "{\"transition\":{\"id\":\"$TID\"}}" \
+                "$JIRA_BASE_URL/rest/api/2/issue/$KEY/transitions" && echo "$KEY moved to Done"
+            else
+              echo "::warning::No 'Done' transition found for $KEY"
+            fi
+          fi
