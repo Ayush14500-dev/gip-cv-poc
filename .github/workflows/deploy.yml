@@ -17,26 +17,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Package app
-        run: |
-          mkdir -p dist
-          zip -r dist/app.zip app.py
-          echo "### Build" >> "$GITHUB_STEP_SUMMARY"
-          echo "Package created for commit \`${GITHUB_SHA::7}\`" >> "$GITHUB_STEP_SUMMARY"
-
-  test:
-    name: Test
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Run unit tests
+      - name: Run tests
         run: |
           pip install pytest
           mkdir -p test-results
@@ -50,30 +31,13 @@ jobs:
           instance-url: ${{ secrets.SN_INSTANCE_URL }}
           tool-id: ${{ secrets.SN_ORCHESTRATION_TOOL_ID }}
           context-github: ${{ toJSON(github) }}
-          job-name: 'Test'
+          job-name: 'Build'
           xml-report-filename: test-results/results.xml
           test-summary-name: 'GIP-POC-UnitTests'
 
-      - name: Test summary
-        if: always()
-        run: |
-          echo "### Unit tests" >> "$GITHUB_STEP_SUMMARY"
-          echo "Results published to ServiceNow as **GIP-POC-UnitTests**" >> "$GITHUB_STEP_SUMMARY"
-
-  deploy-dev:
-    name: Deploy Dev
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy to Dev (no change required)
-        run: |
-          echo "Deploying to DEV..."
-          echo "### Dev" >> "$GITHUB_STEP_SUMMARY"
-          echo "Deployed to Dev - no change request required" >> "$GITHUB_STEP_SUMMARY"
-
-  deploy-prod:
-    name: Deploy Prod
-    needs: deploy-dev
+  deploy:
+    name: Deploy
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - name: ServiceNow Change
@@ -84,15 +48,12 @@ jobs:
           instance-url: ${{ secrets.SN_INSTANCE_URL }}
           tool-id: ${{ secrets.SN_ORCHESTRATION_TOOL_ID }}
           context-github: ${{ toJSON(github) }}
-          job-name: 'Deploy Prod'
-          change-request: '{"setCloseCode":"true","attributes":{"chg_model":"007c4001c343101035ae3f52c1d3aeb2","type":"normal","short_description":"GIP POC - Prod deployment of ${{ github.repository }} (run ${{ github.run_number }})","description":"Automated change raised by GitHub Actions. Repo: ${{ github.repository }}. Commit: ${{ github.sha }}. Triggered by: ${{ github.actor }}. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}","implementation_plan":"Automated deploy to Prod via GitHub Actions after successful Build, Test and Dev deployment","backout_plan":"Re-run the pipeline for the previous successful commit","test_plan":"Unit test results attached to this change from the Test stage"}}'
+          job-name: 'Deploy'
+          change-request: '{"setCloseCode":"true","attributes":{"chg_model":"007c4001c343101035ae3f52c1d3aeb2","type":"normal","short_description":"POC - automated deployment from GitHub","description":"Change created by GitHub Actions for Change Velocity POC","implementation_plan":"Automated deploy via GitHub Actions","backout_plan":"Redeploy previous version","test_plan":"Build job passed"}}'
           interval: '100'
-          timeout: '600'
+          timeout: '3600'
           changeCreationTimeOut: '3600'
           abortOnChangeCreationFailure: true
 
-      - name: Deploy to Prod
-        run: |
-          echo "Deploying to PROD under change ${{ steps.create.outputs.change-request-number }}"
-          echo "### Prod" >> "$GITHUB_STEP_SUMMARY"
-          echo "Deployed to Prod under ServiceNow change **${{ steps.create.outputs.change-request-number }}**" >> "$GITHUB_STEP_SUMMARY"
+      - name: Deploy
+        run: echo "Deploying under change ${{ steps.create.outputs.change-request-number }}"
