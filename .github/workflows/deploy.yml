@@ -87,7 +87,7 @@ jobs:
           job-name: 'Deploy Prod'
           change-request: '{"setCloseCode":"true","attributes":{"chg_model":"007c4001c343101035ae3f52c1d3aeb2","type":"normal","short_description":"GIP POC - Prod deployment of ${{ github.repository }} (run ${{ github.run_number }})","description":"Automated change raised by GitHub Actions. Repo: ${{ github.repository }}. Commit: ${{ github.sha }}. Triggered by: ${{ github.actor }}. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}","implementation_plan":"Automated deploy to Prod via GitHub Actions after successful Build, Test and Dev deployment","backout_plan":"Re-run the pipeline for the previous successful commit","test_plan":"Unit test results attached to this change from the Test stage"}}'
           interval: '100'
-          timeout: '3600'
+          timeout: '600'
           changeCreationTimeOut: '3600'
           abortOnChangeCreationFailure: true
 
